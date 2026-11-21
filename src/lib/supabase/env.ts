@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { CookieOptions } from "@supabase/ssr";
+import type { CookieOptionsWithName } from "@supabase/ssr";
 
 type SupabaseEnv = {
   url: string;
@@ -55,26 +55,62 @@ export function getSiteUrl(fallbackOrigin?: string | null): string {
     "http://localhost:3000"
   ).replace(/\/+$/, "");
 
+  let parsed: URL;
+
   try {
-    const parsed = new URL(value);
-
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      throw new Error("SITE_URL must use http or https.");
-    }
-
-    return parsed.origin;
+    parsed = new URL(value);
   } catch {
     throw new Error("SITE_URL must be an absolute http(s) URL.");
   }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("SITE_URL must use http or https.");
+  }
+
+  const isLocalHost =
+    parsed.hostname === "localhost" ||
+    parsed.hostname === "127.0.0.1" ||
+    parsed.hostname === "[::1]";
+
+  if (
+    process.env.NODE_ENV === "production" &&
+    parsed.protocol !== "https:" &&
+    !isLocalHost
+  ) {
+    throw new Error("SITE_URL must use https in production.");
+  }
+
+  return parsed.origin;
 }
 
-export function getSupabaseCookieOptions(): CookieOptions {
+export function getSupabaseCookieOptions(): CookieOptionsWithName {
+  const isProduction = process.env.NODE_ENV === "production";
+
   return {
+    // __Host- forbids a Domain attribute and requires Path=/ plus Secure, so a
+    // sibling subdomain cannot overwrite the session cookie. Development keeps
+    // the unprefixed name because Secure is not guaranteed over plain HTTP.
+    name: isProduction ? "__Host-nairatrack-auth" : "nairatrack-auth",
     path: "/",
     sameSite: "lax",
     // All Supabase access happens in server code, so the browser never needs
     // to read the session cookie. HttpOnly keeps XSS from stealing it.
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: isProduction,
   };
+}
+
+/**
+ * The cookie name @supabase/ssr used before the __Host- change. It is derived
+ * from the project reference exactly as supabase-js does. Returned so the proxy
+ * can expire the old host-only cookies instead of leaving orphaned sessions in
+ * browsers indefinitely.
+ */
+export function getLegacyAuthCookiePrefix(supabaseUrl: string): string | null {
+  try {
+    const ref = new URL(supabaseUrl).hostname.split(".")[0];
+    return ref ? `sb-${ref}-auth-token` : null;
+  } catch {
+    return null;
+  }
 }

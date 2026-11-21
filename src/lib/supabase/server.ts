@@ -21,6 +21,10 @@ export async function createClient() {
         return cookieStore.getAll();
       },
       setAll(cookiesToSet) {
+        // @supabase/ssr also supplies anti-cache headers here. Next.js sets
+        // `Cache-Control: no-store` on Server Action responses, and the auth
+        // callback route sets the same headers on its redirects, so the cookie
+        // write is already protected in every place this client is used.
         try {
           cookiesToSet.forEach(({ name, value, options }) => {
             cookieStore.set(name, value, options);

@@ -3,6 +3,21 @@ import { NextResponse } from "next/server";
 import { getSiteUrl } from "@/lib/supabase/env";
 import { createClient } from "@/lib/supabase/server";
 
+function redirectTo(url: URL): NextResponse {
+  const response = NextResponse.redirect(url);
+
+  // This route writes auth cookies. Keep the response out of shared caches so
+  // a session cannot be replayed to another visitor by a CDN.
+  response.headers.set(
+    "Cache-Control",
+    "private, no-cache, no-store, max-age=0, must-revalidate",
+  );
+  response.headers.set("Expires", "0");
+  response.headers.set("Pragma", "no-cache");
+
+  return response;
+}
+
 function safeNextPath(value: string | null): string {
   if (
     !value ||
@@ -39,22 +54,22 @@ export async function GET(request: Request) {
   const next = safeNextPath(requestUrl.searchParams.get("next"));
 
   if (!code) {
-    return NextResponse.redirect(new URL("/login?error=missing_code", siteUrl));
+    return redirectTo(new URL("/login?error=missing_code", siteUrl));
   }
 
   const supabase = await createClient();
   const { error } = await supabase.auth.exchangeCodeForSession(code);
 
   if (error) {
-    return NextResponse.redirect(new URL("/login?error=link_expired", siteUrl));
+    return redirectTo(new URL("/login?error=link_expired", siteUrl));
   }
 
   const redirectUrl = new URL(next, siteUrl);
 
   // Final same-origin guard in case URL normalization changes the target.
   if (redirectUrl.origin !== new URL(siteUrl).origin) {
-    return NextResponse.redirect(new URL("/dashboard", siteUrl));
+    return redirectTo(new URL("/dashboard", siteUrl));
   }
 
-  return NextResponse.redirect(redirectUrl);
+  return redirectTo(redirectUrl);
 }

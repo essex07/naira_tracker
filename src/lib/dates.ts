@@ -1,6 +1,8 @@
 export const APP_TIME_ZONE = "Africa/Lagos";
 
-const MONTH_KEY_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+// The database rejects entries before 2000-01-01, so older month keys are not
+// useful query inputs and should not reach SQL at all.
+const MONTH_KEY_PATTERN = /^20\d{2}-(0[1-9]|1[0-2])$/;
 
 function partsFor(date: Date, timeZone = APP_TIME_ZONE) {
   return new Intl.DateTimeFormat("en-GB", {

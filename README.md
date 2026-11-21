@@ -155,7 +155,7 @@ Open [http://localhost:3000](http://localhost:3000), create an account, confirm 
 | `SUPABASE_URL` | Yes | Supabase project URL. |
 | `SUPABASE_PUBLISHABLE_KEY` | Yes* | Publishable key, read only by server code. Not a secret; RLS is the security boundary. |
 | `SUPABASE_ANON_KEY` | Yes* | Legacy anon key, used if the publishable key is absent. |
-| `SITE_URL` | Yes in production | Absolute URL used in confirmation-email redirects. Production fails closed if it is missing, so email links cannot be derived from a spoofed request origin. |
+| `SITE_URL` | Yes in production | Absolute URL used in confirmation-email redirects and route-guard redirects. Production fails closed if it is missing, invalid, or plain HTTP (localhost excepted), so links cannot be derived from a spoofed request origin. |
 
 \* One of the two keys is required.
 
@@ -297,12 +297,16 @@ All **write** functions are `SECURITY DEFINER` with `set search_path = ''` and c
 
 - **Passwords:** Supabase Auth stores and hashes passwords in its `auth` schema. The app has no password columns and never receives a stored hash.
 - **Server-only Supabase keys:** `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and `SUPABASE_ANON_KEY` are read only from `src/lib/supabase/env.ts`, which imports `server-only`. The browser bundle contains no Supabase URL or key. Never add a `service_role`/secret key.
-- **Session cookies:** Supabase SSR cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` in production. Because every Supabase call is server-side, the browser never needs to read the session.
+- **Session cookies:** Supabase SSR cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` in production. In production they use the `__Host-` prefix, which prevents a sibling subdomain from overwriting the session cookie; the proxy expires the old unprefixed cookie names. Because every Supabase call is server-side, the browser never needs to read the session.
+- **Auth response caching:** Every response that writes Supabase cookies carries `Cache-Control: private, no-cache, no-store`, `Expires: 0`, and `Pragma: no-cache`, including proxy token refreshes and the auth callback redirect.
 - **Database access:** RLS is enabled on every user table. Direct writes are revoked, writes go through `SECURITY DEFINER` RPCs with explicit `auth.uid()` checks and `set search_path = ''`, and reporting views use `security_invoker = true`. `get_dashboard` is `SECURITY INVOKER`.
 - **SQL injection:** Queries use the Supabase query builder or typed RPC parameters. There is no string-built SQL.
 - **XSS:** React escapes rendered text and the app does not use `dangerouslySetInnerHTML`. A per-request nonce CSP restricts scripts to the app origin, and `frame-ancestors 'none'`, `object-src 'none'`, and `base-uri 'self'` are set. HSTS, `nosniff`, frame denial, referrer, permissions, and cross-origin headers are also sent.
 - **CSRF:** Mutations are Next.js Server Actions, which reject cross-origin `Origin`/`Host` requests. Auth cookies are `SameSite=Lax`, and the email callback uses the PKCE code exchange.
-- **Redirects:** `/auth/callback?next=` is normalized and rejected unless it stays on the configured `SITE_URL`.
+- **Account enumeration:** Sign-in failures return one generic message for an unknown email, a wrong password, and an unconfirmed address. Sign-up treats an existing account like a new one, so the form cannot be used to discover registered emails. Sign-in inputs are bounded to a 254-character email and a 72-character password before any request reaches Supabase.
+- **Brute force:** The app adds a process-local, per-account throttle: five failed sign-ins within 15 minutes block that account for 30 minutes. It is not shared across serverless instances, so a public deployment should also use edge/WAF rate limiting or a distributed limiter; Supabase's own Auth rate limits still apply.
+- **Redirects:** `/auth/callback?next=` is normalized and rejected unless it stays on the configured `SITE_URL`. The proxy also builds route-guard redirects from `SITE_URL` rather than the request `Host`, so a spoofed host header cannot choose the redirect origin.
+- **Caching:** Dashboard HTML and RSC payloads are marked `private, no-store` and `noindex`, so a CDN or search crawler cannot retain a user's ledger.
 - **Admin/debug:** There are no admin routes or debug flags. Production is served with `npm run build && npm start`; `next dev` must not be exposed publicly.
 - **Dependencies:** `npm audit` reports 0 vulnerabilities. All direct dependencies are used; do not add packages unless they replace real functionality.
 
@@ -310,7 +314,7 @@ All **write** functions are `SECURITY DEFINER` with `set search_path = ''` and c
 
 These are enforced by Supabase, not by application code:
 
-1. **Authentication → Rate Limits** — sign-in/sign-up defaults to **30 requests per 5 minutes per IP**. Raise or lower this deliberately. Because server-side rendering calls Auth from your server, all users can share one IP; for a multi-user deployment, add CAPTCHA or a distributed limiter. The app already displays Supabase's rate-limit error safely.
+1. **Authentication → Rate Limits** — sign-in/sign-up defaults to **30 requests per 5 minutes per IP**. Raise or lower this deliberately. Because server-side rendering calls Auth from your server, all users share one IP; the app's per-account throttle is process-local, so for a public or multi-instance deployment add CAPTCHA, edge/WAF rate limiting, or a distributed limiter. The app displays Supabase's rate-limit and outage errors without locking users out locally.
 2. **Authentication → Sessions** — keep JWT expiry at 1 hour (the default), keep refresh-token rotation on, and optionally set a time-box or inactivity timeout.
 3. **Authentication → Password** — set a minimum length of at least 8 (the app also enforces 8) and enable leaked-password protection if your plan provides it.
 4. **Authentication → Emails** — use custom SMTP in production. `auth.email.otp_expiry` defaults to **3600 seconds**, so confirmation and recovery links expire after one hour.
@@ -417,7 +421,7 @@ nairatrack-supabase/
 | `npm run typecheck` | TypeScript check with `tsc --noEmit`. |
 | `npm run lint` | ESLint. |
 
-This project has been verified with `typecheck`, `lint`, `build`, a full database integration test (two users, RLS isolation, top-up idempotence, weekly totals, expected savings, the seven-category rebalance, debt-free reallocation and historical months), and browser QA at desktop and mobile widths.
+This project has been verified with `typecheck`, `lint`, `build`, a full database integration test (two users, RLS isolation, top-up idempotence, weekly totals, expected savings, the seven-category rebalance, debt-free reallocation and historical months), and browser QA at desktop and mobile widths. Focused checks also cover login throttling, month-key bounds, `SITE_URL` fail-closed behaviour, cookie naming/legacy cleanup, and reporting-view/anonymous-role isolation.
 
 ---
 
@@ -456,7 +460,10 @@ The app needs outbound HTTPS access to your Supabase project. It does not need a
 - [ ] `.env.local` is not committed (it is git-ignored).
 - [ ] Never add a service-role/secret key to the app. Only the publishable/anon key is needed.
 - [ ] Supabase Auth rate limits, email expiry, and session settings reviewed.
+- [ ] Edge/WAF rate limiting configured for public deployments; the in-process login throttle is per instance.
 - [ ] If you change category caps or the income target, do it deliberately; caps are shared plan data.
+
+> Deploying the `__Host-` cookie change signs existing users out once. The proxy expires the old cookie names on their next request, so they simply sign in again.
 
 ---
 
