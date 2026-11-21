@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Fraunces, Manrope } from "next/font/google";
+import { connection } from "next/server";
 
 import "./globals.css";
 
@@ -41,9 +42,13 @@ export const viewport: Viewport = {
   colorScheme: "light",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  // CSP nonces are generated per request, so every page must be rendered
+  // dynamically. This app is session-driven and has no static marketing pages.
+  await connection();
+
   return (
     <html lang="en" className={`${manrope.variable} ${fraunces.variable}`}>
       <body className="min-h-screen bg-paper font-sans text-ink antialiased">

@@ -4,6 +4,7 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 
+import { getSiteUrl } from "@/lib/supabase/env";
 import { createClient } from "@/lib/supabase/server";
 import type { ActionState } from "@/lib/types";
 import { fieldErrors } from "@/lib/validation";
@@ -113,10 +114,7 @@ export async function signUpAction(
   }
 
   const headerStore = await headers();
-  const siteUrl =
-    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ??
-    headerStore.get("origin") ??
-    "http://localhost:3000";
+  const siteUrl = getSiteUrl(headerStore.get("origin"));
 
   const supabase = await createClient();
   const { data, error } = await supabase.auth.signUp({

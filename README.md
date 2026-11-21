@@ -120,13 +120,14 @@ cp .env.example .env.local
 Then fill in the values from **Project Settings → API**:
 
 ```dotenv
-NEXT_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_your_key
-NEXT_PUBLIC_SITE_URL=http://localhost:3000
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_your_key
+SITE_URL=http://localhost:3000
 ```
 
-- Use the **publishable key** (new Supabase projects). Legacy projects can use `NEXT_PUBLIC_SUPABASE_ANON_KEY` instead; the code supports either.
-- **Never** put the `service_role` / secret key in this file. The browser and server components only need the public key. All privileged writes happen through database functions that check the signed-in user.
+- Use the **publishable key** (new Supabase projects). Legacy projects can use `SUPABASE_ANON_KEY` instead; the code supports either.
+- These variables are read only by server code. Do **not** rename them to `NEXT_PUBLIC_*`; that would inline them into the browser bundle.
+- **Never** put the `service_role` / secret key in this file. The app needs only the publishable/anon key. All privileged writes happen through database functions that check the signed-in user.
 
 ### 5. Install and run
 
@@ -151,10 +152,10 @@ Open [http://localhost:3000](http://localhost:3000), create an account, confirm 
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `NEXT_PUBLIC_SUPABASE_URL` | Yes | Supabase project URL. |
-| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Yes* | Public publishable key. |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Yes* | Legacy anon key, used if the publishable key is absent. |
-| `NEXT_PUBLIC_SITE_URL` | Recommended | Absolute URL used in confirmation-email redirects. Falls back to the request origin, but set it explicitly in production. |
+| `SUPABASE_URL` | Yes | Supabase project URL. |
+| `SUPABASE_PUBLISHABLE_KEY` | Yes* | Publishable key, read only by server code. Not a secret; RLS is the security boundary. |
+| `SUPABASE_ANON_KEY` | Yes* | Legacy anon key, used if the publishable key is absent. |
+| `SITE_URL` | Yes in production | Absolute URL used in confirmation-email redirects. Production fails closed if it is missing, so email links cannot be derived from a spoofed request origin. |
 
 \* One of the two keys is required.
 
@@ -290,6 +291,32 @@ All **write** functions are `SECURITY DEFINER` with `set search_path = ''` and c
 - `profiles` allows an owner-scoped update of `full_name` and `income_target` at the grant level, but the app currently has no profile editor; use the SQL snippet below to change the target.
 - `debt_free_at` is **not** directly writable by clients. It can only be changed through `set_debt_status`, which checks the signed-in user.
 
+## Security
+
+### What is implemented
+
+- **Passwords:** Supabase Auth stores and hashes passwords in its `auth` schema. The app has no password columns and never receives a stored hash.
+- **Server-only Supabase keys:** `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and `SUPABASE_ANON_KEY` are read only from `src/lib/supabase/env.ts`, which imports `server-only`. The browser bundle contains no Supabase URL or key. Never add a `service_role`/secret key.
+- **Session cookies:** Supabase SSR cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` in production. Because every Supabase call is server-side, the browser never needs to read the session.
+- **Database access:** RLS is enabled on every user table. Direct writes are revoked, writes go through `SECURITY DEFINER` RPCs with explicit `auth.uid()` checks and `set search_path = ''`, and reporting views use `security_invoker = true`. `get_dashboard` is `SECURITY INVOKER`.
+- **SQL injection:** Queries use the Supabase query builder or typed RPC parameters. There is no string-built SQL.
+- **XSS:** React escapes rendered text and the app does not use `dangerouslySetInnerHTML`. A per-request nonce CSP restricts scripts to the app origin, and `frame-ancestors 'none'`, `object-src 'none'`, and `base-uri 'self'` are set. HSTS, `nosniff`, frame denial, referrer, permissions, and cross-origin headers are also sent.
+- **CSRF:** Mutations are Next.js Server Actions, which reject cross-origin `Origin`/`Host` requests. Auth cookies are `SameSite=Lax`, and the email callback uses the PKCE code exchange.
+- **Redirects:** `/auth/callback?next=` is normalized and rejected unless it stays on the configured `SITE_URL`.
+- **Admin/debug:** There are no admin routes or debug flags. Production is served with `npm run build && npm start`; `next dev` must not be exposed publicly.
+- **Dependencies:** `npm audit` reports 0 vulnerabilities. All direct dependencies are used; do not add packages unless they replace real functionality.
+
+### Supabase dashboard settings
+
+These are enforced by Supabase, not by application code:
+
+1. **Authentication → Rate Limits** — sign-in/sign-up defaults to **30 requests per 5 minutes per IP**. Raise or lower this deliberately. Because server-side rendering calls Auth from your server, all users can share one IP; for a multi-user deployment, add CAPTCHA or a distributed limiter. The app already displays Supabase's rate-limit error safely.
+2. **Authentication → Sessions** — keep JWT expiry at 1 hour (the default), keep refresh-token rotation on, and optionally set a time-box or inactivity timeout.
+3. **Authentication → Password** — set a minimum length of at least 8 (the app also enforces 8) and enable leaked-password protection if your plan provides it.
+4. **Authentication → Emails** — use custom SMTP in production. `auth.email.otp_expiry` defaults to **3600 seconds**, so confirmation and recovery links expire after one hour.
+5. **Authentication → URL Configuration** — set the production Site URL and allow only the exact `/auth/callback` redirect URL.
+6. **Password reset links** — the app has no in-app reset screen yet. If you add one with `resetPasswordForEmail`, Supabase recovery links are single-use and expire according to `auth.email.otp_expiry` (default one hour).
+
 ### Changing the income target
 
 Run in the Supabase SQL Editor (replace the email):
@@ -332,7 +359,7 @@ nairatrack-supabase/
 │  │  ├─ error.tsx                  Global error boundary
 │  │  ├─ globals.css                Tailwind theme and design tokens
 │  │  ├─ icon.svg                   Favicon
-│  │  ├─ layout.tsx                 Fonts, metadata, viewport
+│  │  ├─ layout.tsx                 Fonts, metadata, per-request CSP rendering
 │  │  ├─ not-found.tsx
 │  │  └─ page.tsx                   Redirects to /dashboard or /login
 │  ├─ components/
@@ -356,12 +383,12 @@ nairatrack-supabase/
 │  │  ├─ dates.ts                   Month/week helpers, Africa/Lagos dates
 │  │  ├─ format.ts                  Naira and percentage formatting
 │  │  ├─ supabase/
-│  │  │  ├─ env.ts                  Env validation, publishable/anon fallback
+│  │  │  ├─ env.ts                  Server-only env validation and secure cookie options
 │  │  │  └─ server.ts               SSR Supabase client
 │  │  ├─ types.ts                   Shared dashboard and action types
 │  │  ├─ utils.ts                   cn() helper
 │  │  └─ validation.ts              Zod schemas
-│  └─ proxy.ts                      Session refresh + route protection (Next 16)
+│  └─ proxy.ts                      Session refresh, route protection, nonce CSP (Next 16)
 ├─ supabase/
 │  └─ migrations/
 │     ├─ 20261118000000_initial_schema.sql
@@ -374,7 +401,7 @@ nairatrack-supabase/
 └─ README.md
 ```
 
-`src/proxy.ts` replaces `middleware.ts` in Next.js 16. It refreshes Supabase auth cookies on every request and redirects unauthenticated users away from `/dashboard` and `/`, and authenticated users away from `/login` and `/signup`.
+`src/proxy.ts` replaces `middleware.ts` in Next.js 16. It generates a per-request CSP nonce, refreshes Supabase auth cookies, and redirects unauthenticated users away from `/dashboard` and `/`, and authenticated users away from `/login` and `/signup`. The root layout is dynamic because nonces cannot be applied to prerendered HTML.
 
 `AGENTS.md` is generated automatically by `next dev` for AI coding assistants. It has no runtime effect and may be committed or left untracked.
 
@@ -401,9 +428,9 @@ This project has been verified with `typecheck`, `lint`, `build`, a full databas
 1. Push the project to a Git repository.
 2. Import it into Vercel. The Next.js defaults are correct.
 3. Add the environment variables from `.env.example` in **Project → Settings → Environment Variables**:
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (or `NEXT_PUBLIC_SUPABASE_ANON_KEY`)
-   - `NEXT_PUBLIC_SITE_URL=https://your-domain.com`
+   - `SUPABASE_URL`
+   - `SUPABASE_PUBLISHABLE_KEY` (or `SUPABASE_ANON_KEY`)
+   - `SITE_URL=https://your-domain.com`
 4. Deploy.
 5. In Supabase **Authentication → URL Configuration**, set:
    - Site URL: `https://your-domain.com`
@@ -425,9 +452,10 @@ The app needs outbound HTTPS access to your Supabase project. It does not need a
 - [ ] All migrations applied to the production Supabase project, in order.
 - [ ] Email confirmation configured as desired and custom SMTP connected for production mail.
 - [ ] Site URL and `/auth/callback` redirect URLs set to the production domain.
-- [ ] `NEXT_PUBLIC_SITE_URL` set to the production domain.
+- [ ] `SITE_URL` set to the production domain, including `https://`.
 - [ ] `.env.local` is not committed (it is git-ignored).
-- [ ] Never add a service-role key to any `NEXT_PUBLIC_*` variable.
+- [ ] Never add a service-role/secret key to the app. Only the publishable/anon key is needed.
+- [ ] Supabase Auth rate limits, email expiry, and session settings reviewed.
 - [ ] If you change category caps or the income target, do it deliberately; caps are shared plan data.
 
 ---
@@ -441,7 +469,7 @@ Add both URL and key to `.env.local`, then restart `npm run dev`. Environment ch
 The dashboard RPC failed. Confirm both migrations ran in the same Supabase project as the URL in `.env.local`, and that `get_dashboard` exists under **Database → Functions**. Check the browser/server console for the underlying Supabase error.
 
 **Confirmation email opens localhost in production**
-Set `NEXT_PUBLIC_SITE_URL` to the production URL, rebuild/redeploy, and update Supabase's Site URL and redirect allow-list.
+Set `SITE_URL` to the production URL, rebuild/redeploy, and update Supabase's Site URL and redirect allow-list.
 
 **"Email rate limit exceeded" on sign-up**
 The built-in Supabase email sender is limited. Wait, or configure custom SMTP under Authentication settings.
@@ -481,7 +509,7 @@ Delete the entry in the ledger and add it again with the correct amount and date
 - **Savings counts as money out.** It reduces available cash, which is the honest cash-flow view, but it is excluded from the "expected savings" calculation except as the actual side of the comparison.
 - **Debt-free is a plan reallocation, not a cash transfer.** It raises the Savings cap and expected savings, but it does not insert a fake transaction. Record the actual transfer when the money moves.
 - **No edit-in-place.** Entries are append-and-delete. This keeps the ledger simple and auditable.
-- **No in-app password reset UI.** Supabase Auth supports recovery links; adding a reset screen is a small extension if you need it.
+- **No in-app password reset UI.** Supabase Auth supports recovery links; adding a reset screen is a small extension if you need it. Recovery links are single-use and expire after `auth.email.otp_expiry` (default one hour).
 - **The dashboard returns the most recent 200 expenses** for the selected month in its JSON payload. All totals are computed over the full month; the cap only limits ledger rows sent to the browser.
 
 ---
